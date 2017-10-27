@@ -1,21 +1,32 @@
 package nlp.intent.toolkit;
 
+import opennlp.tools.doccat.DoccatFactory;
 import opennlp.tools.doccat.DoccatModel;
 import opennlp.tools.doccat.DocumentCategorizerME;
 import opennlp.tools.doccat.DocumentSample;
-import opennlp.tools.namefind.NameFinderME;
-import opennlp.tools.namefind.NameSample;
-import opennlp.tools.namefind.NameSampleDataStream;
-import opennlp.tools.namefind.TokenNameFinderModel;
+import opennlp.tools.namefind.*;
 import opennlp.tools.tokenize.WhitespaceTokenizer;
 import opennlp.tools.util.*;
 import opennlp.tools.util.featuregen.AdaptiveFeatureGenerator;
 
-import java.io.File;
-import java.io.FileInputStream;
+import java.io.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+
+class FileInputStreamFactory implements InputStreamFactory {
+
+    private String pathToFile;
+
+    public FileInputStreamFactory(String path) {
+        this.pathToFile = path;
+    }
+
+    public InputStream createInputStream() throws IOException {
+        return new FileInputStream(this.pathToFile);
+    }
+}
 
 public class IntentTrainer {
 
@@ -35,13 +46,27 @@ public class IntentTrainer {
         List<ObjectStream<DocumentSample>> categoryStreams = new ArrayList<ObjectStream<DocumentSample>>();
         for (File trainingFile : trainingDirectory.listFiles()) {
             String intent = trainingFile.getName().replaceFirst("[.][^.]+$", "");
-            ObjectStream<String> lineStream = new PlainTextByLineStream(new FileInputStream(trainingFile), "UTF-8");
+            ObjectStream<String> lineStream = new PlainTextByLineStream(new FileInputStreamFactory(trainingFile.getPath()), "UTF-8");
             ObjectStream<DocumentSample> documentSampleStream = new IntentDocumentSampleStream(intent, lineStream);
             categoryStreams.add(documentSampleStream);
         }
-        ObjectStream<DocumentSample> combinedDocumentSampleStream = ObjectStreamUtils.createObjectStream(categoryStreams.toArray(new ObjectStream[0]));
 
-        DoccatModel doccatModel = DocumentCategorizerME.train("en", combinedDocumentSampleStream, 0, 100);
+
+        List<DocumentSample> samples = new ArrayList<DocumentSample>();
+        DocumentSample sample;
+
+        for (ObjectStream<DocumentSample> item : categoryStreams){
+            while ((sample = item.read()) != null){
+                samples.add(sample);
+            }
+        }
+
+        ObjectStream<DocumentSample> combinedDocumentSampleStream = ObjectStreamUtils.createObjectStream(samples);
+
+        TrainingParameters parameters = new TrainingParameters();
+        DoccatFactory factory = new DoccatFactory();
+
+        DoccatModel doccatModel = DocumentCategorizerME.train("en", combinedDocumentSampleStream, parameters, factory);
         combinedDocumentSampleStream.close();
 
         List<TokenNameFinderModel> tokenNameFinderModels = new ArrayList<TokenNameFinderModel>();
@@ -49,14 +74,25 @@ public class IntentTrainer {
         for(String slot : slots) {
             List<ObjectStream<NameSample>> nameStreams = new ArrayList<ObjectStream<NameSample>>();
             for (File trainingFile : trainingDirectory.listFiles()) {
-                ObjectStream<String> lineStream = new PlainTextByLineStream(new FileInputStream(trainingFile), "UTF-8");
+                ObjectStream<String> lineStream = new PlainTextByLineStream(new FileInputStreamFactory(trainingFile.getPath()), "UTF-8");
                 ObjectStream<NameSample> nameSampleStream = new NameSampleDataStream(lineStream);
                 nameStreams.add(nameSampleStream);
             }
-            ObjectStream<NameSample> combinedNameSampleStream = ObjectStreamUtils.createObjectStream(nameStreams.toArray(new ObjectStream[0]));
 
-            TokenNameFinderModel tokenNameFinderModel = NameFinderME.train("en", "city", combinedNameSampleStream, TrainingParameters.defaultParams(),
-                    (AdaptiveFeatureGenerator)null, Collections.<String, Object>emptyMap());
+            List<NameSample> nameSamples = new ArrayList<NameSample>();
+            NameSample nameSample;
+
+            for (ObjectStream<NameSample> item : nameStreams){
+                while ((nameSample = item.read()) != null){
+                    nameSamples.add(nameSample);
+                }
+            }
+
+
+            ObjectStream<NameSample> combinedNameSampleStream = ObjectStreamUtils.createObjectStream(nameSamples);
+            TokenNameFinderFactory nfFactory = new TokenNameFinderFactory();
+
+            TokenNameFinderModel tokenNameFinderModel = NameFinderME.train("en", "city", combinedNameSampleStream, TrainingParameters.defaultParams(), nfFactory);
             combinedNameSampleStream.close();
             tokenNameFinderModels.add(tokenNameFinderModel);
         }
@@ -70,9 +106,21 @@ public class IntentTrainer {
 
         System.out.println("Training complete. Ready.");
         System.out.print(">");
-        String s;
-        while((s = System.console().readLine()) != null){
-            double[] outcome = categorizer.categorize(s);
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+
+        while(true){
+
+            String s = reader.readLine();
+
+            String[] source = { s };
+            double[] outcome = categorizer.categorize(source);
+            Map<String, Double> scores = categorizer.scoreMap(source);
+
+            for (String category : scores.keySet()){
+                System.out.println("Category=" + category + " score=" + scores.get(category));
+            }
+
             System.out.print("action=" + categorizer.getBestCategory(outcome) + " args={ ");
 
             String[] tokens = WhitespaceTokenizer.INSTANCE.tokenize(s);
